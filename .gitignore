@@ -1,0 +1,8 @@
+build/
+*.bin
+*.elf
+*.map
+.vscode/
+sdkconfig
+sdkconfig.old
+micropython/lib/**/build*
