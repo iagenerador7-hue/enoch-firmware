@@ -34,7 +34,7 @@ jobs:
         run: |
           . $IDF_PATH/export.sh
           cd micropython/ports/esp32
-          make submodules
+          make BOARD=ESP32_GENERIC_S3 BOARD_VARIANT=SPIRAM_OCT submodules
           make \
             BOARD=ESP32_GENERIC_S3 \
             BOARD_VARIANT=SPIRAM_OCT \
