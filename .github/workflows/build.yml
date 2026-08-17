@@ -50,7 +50,7 @@ jobs:
         with:
           name: enoch-firmware-bin
           path: |
-            micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/firmware.bin
+            micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/micropython.bin
             micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/bootloader/bootloader.bin
             micropython/ports/esp32/build-ESP32_GENERIC_S3-SPIRAM_OCT/partition_table/partition-table.bin
           retention-days: 30
