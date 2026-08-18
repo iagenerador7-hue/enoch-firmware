@@ -17,13 +17,28 @@ static i2s_chan_handle_t tx_handle = NULL;
 static i2s_chan_handle_t rx_handle = NULL;
 static bool enoch_i2s_ready = false;
 
+// ---- limpieza interna del canal (usada por init() y deinit()) ----
+static void enoch_i2s_cleanup(void) {
+    if (enoch_i2s_ready) {
+        i2s_channel_disable(tx_handle);
+        i2s_channel_disable(rx_handle);
+        i2s_del_channel(tx_handle);
+        i2s_del_channel(rx_handle);
+        tx_handle = NULL;
+        rx_handle = NULL;
+        enoch_i2s_ready = false;
+    }
+}
+
 // ---- init(sample_rate=16000) ----
 static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
     uint32_t sample_rate = (n_args > 0) ? mp_obj_get_int(args[0]) : 16000;
 
-    if (enoch_i2s_ready) {
-        mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("ya inicializado, llama deinit() primero"));
-    }
+    // Idempotente: si ya habia un canal abierto (de una llamada anterior
+    // en la misma sesion), lo cerramos primero en vez de fallar con
+    // RuntimeError. Asi init() se puede llamar las veces que haga falta
+    // sin que quien lo usa tenga que acordarse de llamar deinit() antes.
+    enoch_i2s_cleanup();
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     if (i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) {
@@ -89,15 +104,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(enoch_i2s_write_obj, enoch_i2s_write);
 
 // ---- deinit() ----
 static mp_obj_t enoch_i2s_deinit(void) {
-    if (enoch_i2s_ready) {
-        i2s_channel_disable(tx_handle);
-        i2s_channel_disable(rx_handle);
-        i2s_del_channel(tx_handle);
-        i2s_del_channel(rx_handle);
-        tx_handle = NULL;
-        rx_handle = NULL;
-        enoch_i2s_ready = false;
-    }
+    enoch_i2s_cleanup();
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(enoch_i2s_deinit_obj, enoch_i2s_deinit);
