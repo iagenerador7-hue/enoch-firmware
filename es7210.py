@@ -124,6 +124,7 @@ class ES7210:
         self._write(REG_MIC12_POWER, 0x0F)
         self._write(REG_MIC34_POWER, 0x0F)
 
+        self._write(REG_CLOCK_OFF, 0x00)
         self._write(REG_RESET, 0x71)
         self._write(REG_RESET, 0x41)
 
