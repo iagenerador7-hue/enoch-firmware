@@ -34,7 +34,7 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
         .clk_cfg = {
             .sample_rate_hz = sample_rate,
             .clk_src = I2S_CLK_SRC_DEFAULT,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256,
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
