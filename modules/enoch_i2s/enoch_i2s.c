@@ -5,6 +5,7 @@
 #include "py/runtime.h"
 #include "py/obj.h"
 #include "driver/i2s_std.h"
+#include "freertos/FreeRTOS.h"
 
 // ---- Pinout fijo (LAFVIN ESP32-S3 AIChatBot) ----
 #define ENOCH_MCLK_PIN   38
@@ -72,6 +73,21 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
     i2s_channel_enable(tx_handle);
     i2s_channel_enable(rx_handle);
     enoch_i2s_ready = true;
+
+    // La primera lectura del canal RX justo tras habilitarlo suele traer
+    // datos residuales del buffer DMA (basura / valores fijos), no
+    // muestras reales del codec todavia en regimen estable. Se descarta
+    // una lectura aca mismo, dentro del driver, para que quien use
+    // enoch_i2s.read() desde Python siempre reciba datos reales desde
+    // la primera llamada, sin necesidad de descartar nada manualmente.
+    {
+        uint8_t discard_buf[512];
+        size_t discard_read = 0;
+        // Timeout corto (100 ms): si por algun motivo no hay datos
+        // listos todavia, no queremos bloquear init() indefinidamente.
+        i2s_channel_read(rx_handle, discard_buf, sizeof(discard_buf), &discard_read, pdMS_TO_TICKS(100));
+    }
+
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(enoch_i2s_init_obj, 0, 1, enoch_i2s_init);
