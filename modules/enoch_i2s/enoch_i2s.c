@@ -76,8 +76,25 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
     // RX: ahora en STEREO explicito, para capturar los 2 slots completos
     // (MIC1 izquierda, MIC2 derecha) sin depender del filtrado mono del
     // hardware, que resulto no ser confiable.
-    i2s_std_config_t std_cfg_rx = std_cfg_tx;
-    std_cfg_rx.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    // (declarado completo aparte, no por asignacion, porque el macro
+    // I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG expande a un inicializador con
+    // llaves y eso solo es valido en una declaracion, no en un `campo = ...`)
+    i2s_std_config_t std_cfg_rx = {
+        .clk_cfg = {
+            .sample_rate_hz = sample_rate,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+        },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = ENOCH_MCLK_PIN,
+            .bclk = ENOCH_BCLK_PIN,
+            .ws   = ENOCH_WS_PIN,
+            .dout = ENOCH_DOUT_PIN,
+            .din  = ENOCH_DIN_PIN,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+        },
+    };
 
     if (i2s_channel_init_std_mode(tx_handle, &std_cfg_tx) != ESP_OK) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("fallo init std tx"));
