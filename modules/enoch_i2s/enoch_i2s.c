@@ -1,11 +1,17 @@
 // enoch_i2s.c - Driver I2S nativo para MicroPython (ESP32-S3)
 // Genera MCLK real por hardware via driver/i2s_std.h (ESP-IDF).
 // Solo maneja el bus I2S. Los códecs ES7210/ES8311 se configuran por I2C en Python.
+//
+// FIX (RX deinterleave): el RX en I2S_SLOT_MODE_MONO no filtra de forma
+// confiable el slot derecho (MIC2) en ESP32-S3 con fuente externa de 2
+// slots (ES7210 en modo no-TDM). Se captura en STEREO y se descarta el
+// slot derecho en software, quedandonos solo con MIC1 (slot izquierdo).
 
 #include "py/runtime.h"
 #include "py/obj.h"
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
+#include <string.h>
 
 // ---- Pinout fijo (LAFVIN ESP32-S3 AIChatBot) ----
 #define ENOCH_MCLK_PIN   38
@@ -14,9 +20,16 @@
 #define ENOCH_DIN_PIN    12   // mic (in)
 #define ENOCH_DOUT_PIN   45   // bocina (out)
 
+// Buffer intermedio para leer el frame estereo completo (L+R) antes de
+// quedarnos solo con L. El doble de grande que el buffer mono pedido
+// por Python. 2048 cubre holgadamente los 1024 bytes que pide
+// talk_to_enoch_live.py (chunk = bytearray(1024)).
+#define ENOCH_RX_STEREO_BUF_MAX 4096
+
 static i2s_chan_handle_t tx_handle = NULL;
 static i2s_chan_handle_t rx_handle = NULL;
 static bool enoch_i2s_ready = false;
+static uint8_t rx_stereo_buf[ENOCH_RX_STEREO_BUF_MAX];
 
 // ---- limpieza interna del canal (usada por init() y deinit()) ----
 static void enoch_i2s_cleanup(void) {
@@ -35,10 +48,6 @@ static void enoch_i2s_cleanup(void) {
 static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
     uint32_t sample_rate = (n_args > 0) ? mp_obj_get_int(args[0]) : 16000;
 
-    // Idempotente: si ya habia un canal abierto (de una llamada anterior
-    // en la misma sesion), lo cerramos primero en vez de fallar con
-    // RuntimeError. Asi init() se puede llamar las veces que haga falta
-    // sin que quien lo usa tenga que acordarse de llamar deinit() antes.
     enoch_i2s_cleanup();
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -46,7 +55,8 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("fallo i2s_new_channel"));
     }
 
-    i2s_std_config_t std_cfg = {
+    // TX: se queda en mono, igual que siempre (nunca dio problemas).
+    i2s_std_config_t std_cfg_tx = {
         .clk_cfg = {
             .sample_rate_hz = sample_rate,
             .clk_src = I2S_CLK_SRC_DEFAULT,
@@ -63,10 +73,16 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
         },
     };
 
-    if (i2s_channel_init_std_mode(tx_handle, &std_cfg) != ESP_OK) {
+    // RX: ahora en STEREO explicito, para capturar los 2 slots completos
+    // (MIC1 izquierda, MIC2 derecha) sin depender del filtrado mono del
+    // hardware, que resulto no ser confiable.
+    i2s_std_config_t std_cfg_rx = std_cfg_tx;
+    std_cfg_rx.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+
+    if (i2s_channel_init_std_mode(tx_handle, &std_cfg_tx) != ESP_OK) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("fallo init std tx"));
     }
-    if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) {
+    if (i2s_channel_init_std_mode(rx_handle, &std_cfg_rx) != ESP_OK) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("fallo init std rx"));
     }
 
@@ -74,17 +90,10 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
     i2s_channel_enable(rx_handle);
     enoch_i2s_ready = true;
 
-    // La primera lectura del canal RX justo tras habilitarlo suele traer
-    // datos residuales del buffer DMA (basura / valores fijos), no
-    // muestras reales del codec todavia en regimen estable. Se descarta
-    // una lectura aca mismo, dentro del driver, para que quien use
-    // enoch_i2s.read() desde Python siempre reciba datos reales desde
-    // la primera llamada, sin necesidad de descartar nada manualmente.
+    // Descarta la primera lectura (datos residuales del DMA), igual que antes.
     {
-        uint8_t discard_buf[512];
+        uint8_t discard_buf[1024];
         size_t discard_read = 0;
-        // Timeout corto (100 ms): si por algun motivo no hay datos
-        // listos todavia, no queremos bloquear init() indefinidamente.
         i2s_channel_read(rx_handle, discard_buf, sizeof(discard_buf), &discard_read, pdMS_TO_TICKS(100));
     }
 
@@ -93,15 +102,39 @@ static mp_obj_t enoch_i2s_init(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(enoch_i2s_init_obj, 0, 1, enoch_i2s_init);
 
 // ---- read(buf) -> bytes leidos ----
+// buf es mono 16-bit (lo que espera talk_to_enoch_live.py). Internamente
+// leemos el doble en estereo (L+R intercalados) y nos quedamos solo con
+// las muestras L (indices pares de 16 bits) = MIC1.
 static mp_obj_t enoch_i2s_read(mp_obj_t buf_obj) {
     if (!enoch_i2s_ready) mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("no inicializado"));
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf_obj, &bufinfo, MP_BUFFER_WRITE);
-    size_t bytes_read = 0;
-    if (i2s_channel_read(rx_handle, bufinfo.buf, bufinfo.len, &bytes_read, portMAX_DELAY) != ESP_OK) {
+
+    size_t mono_bytes_wanted = bufinfo.len;
+    size_t stereo_bytes_wanted = mono_bytes_wanted * 2;
+    if (stereo_bytes_wanted > ENOCH_RX_STEREO_BUF_MAX) {
+        stereo_bytes_wanted = ENOCH_RX_STEREO_BUF_MAX;
+        mono_bytes_wanted = stereo_bytes_wanted / 2;
+    }
+    // Alinear a multiplo de 4 (2 canales x 2 bytes por muestra = 1 frame estereo)
+    stereo_bytes_wanted &= ~((size_t)3);
+
+    size_t stereo_bytes_read = 0;
+    if (i2s_channel_read(rx_handle, rx_stereo_buf, stereo_bytes_wanted, &stereo_bytes_read, portMAX_DELAY) != ESP_OK) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("fallo read"));
     }
-    return mp_obj_new_int(bytes_read);
+
+    // Deinterleave: nos quedamos con la muestra izquierda (primeros 2
+    // bytes) de cada frame de 4 bytes (L de 16 bits + R de 16 bits).
+    int16_t *stereo16 = (int16_t *)rx_stereo_buf;
+    int16_t *mono16 = (int16_t *)bufinfo.buf;
+    size_t frames = stereo_bytes_read / 4;
+    for (size_t i = 0; i < frames; i++) {
+        mono16[i] = stereo16[i * 2];
+    }
+
+    size_t mono_bytes_written = frames * 2;
+    return mp_obj_new_int(mono_bytes_written);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(enoch_i2s_read_obj, enoch_i2s_read);
 
